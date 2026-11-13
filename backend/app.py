@@ -1,89 +1,154 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
 import os
+import yfinance as yf
 from dotenv import load_dotenv
 
-# Load API key from .env file
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
 API_KEY = os.getenv("FINNHUB_API_KEY")
+FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 
 
 @app.route("/")
 def home():
     return jsonify({
-        "message": "Welcome to InvestIQ API!",
-        "status": "Backend is running successfully"
+        "message": "InvestIQ Backend is running!"
     })
 
 
-@app.route("/api/stocks")
-def stocks():
-
-    if not API_KEY:
-        return jsonify({
-            "error": "Finnhub API key not found. Check your .env file."
-        }), 500
-
-    symbols = ["AAPL", "NVDA", "TSLA"]
-    stock_data = []
-
-    for symbol in symbols:
-
-        url = "https://finnhub.io/api/v1/quote"
-
-        params = {
+def get_stock_quote(symbol):
+    response = requests.get(
+        f"{FINNHUB_BASE_URL}/quote",
+        params={
             "symbol": symbol,
             "token": API_KEY
-        }
+        },
+        timeout=15
+    )
 
-        try:
-            response = requests.get(
-                url,
-                params=params,
-                timeout=15
-            )
+    response.raise_for_status()
+    data = response.json()
 
-            if response.status_code != 200:
-                print("Finnhub Status:", response.status_code)
-                print("Finnhub Error:", response.text)
+    if not data.get("c"):
+        return None
 
-                return jsonify({
-                    "error": f"Could not fetch data for {symbol}",
-                    "status_code": response.status_code,
-                    "details": response.text
-                }), 502
+    return {
+        "symbol": symbol,
+        "price": data.get("c"),
+        "change": data.get("dp"),
+        "high": data.get("h"),
+        "low": data.get("l"),
+        "open": data.get("o"),
+        "previousClose": data.get("pc")
+    }
 
-            data = response.json()
 
-            # Finnhub returns zero if no quote is available
-            if data.get("c", 0) == 0:
-                return jsonify({
-                    "error": f"No quote available for {symbol}",
-                    "details": data
-                }), 404
+@app.route("/api/stocks")
+def get_stocks():
+    if not API_KEY:
+        return jsonify({"error": "Finnhub API key is missing"}), 500
 
-            stock_data.append({
-                "name": symbol,
-                "symbol": symbol,
-                "price": data["c"],
-                "change": data["dp"]
+    stocks = []
+
+    try:
+        for symbol in ["AAPL", "NVDA", "TSLA"]:
+            stock = get_stock_quote(symbol)
+            if stock:
+                stocks.append(stock)
+
+        return jsonify(stocks)
+
+    except requests.exceptions.RequestException as error:
+        print("Dashboard API Error:", error)
+        return jsonify({"error": "Could not fetch stock data"}), 502
+
+
+@app.route("/api/quote")
+def get_quote():
+    if not API_KEY:
+        return jsonify({"error": "Finnhub API key is missing"}), 500
+
+    symbol = request.args.get("symbol", "AAPL").strip().upper()
+
+    if not symbol:
+        return jsonify({"error": "Please provide a stock symbol"}), 400
+
+    try:
+        stock = get_stock_quote(symbol)
+
+        if not stock:
+            return jsonify({"error": "No quote data found"}), 404
+
+        return jsonify(stock)
+
+    except requests.exceptions.RequestException as error:
+        print("Quote API Error:", error)
+        return jsonify({"error": "Could not fetch stock quote"}), 502
+
+
+@app.route("/api/history")
+def get_history():
+    symbol = request.args.get("symbol", "AAPL").strip().upper()
+    period = request.args.get("range", "1M").strip().upper()
+
+    ranges = {
+        "1W": ("7d", "1d"),
+        "1M": ("1mo", "1d"),
+        "6M": ("6mo", "1d"),
+        "1Y": ("1y", "1wk")
+    }
+
+    if not symbol:
+        return jsonify({"error": "Please provide a stock symbol"}), 400
+
+    if period not in ranges:
+        return jsonify({
+            "error": "Invalid range. Use 1W, 1M, 6M, or 1Y."
+        }), 400
+
+    yahoo_period, interval = ranges[period]
+
+    try:
+        stock = yf.Ticker(symbol)
+
+        data = stock.history(
+            period=yahoo_period,
+            interval=interval,
+            auto_adjust=True
+        )
+
+        if data.empty:
+            return jsonify({
+                "error": "No historical data found",
+                "symbol": symbol
+            }), 404
+
+        history = []
+
+        for date, row in data.iterrows():
+            history.append({
+                "date": date.strftime("%Y-%m-%d"),
+                "price": round(float(row["Close"]), 2)
             })
 
-        except requests.exceptions.RequestException as error:
-            print("Request Error:", str(error))
+        return jsonify({
+            "symbol": symbol,
+            "range": period,
+            "history": history
+        })
 
-            return jsonify({
-                "error": "Could not connect to Finnhub",
-                "details": str(error)
-            }), 503
-
-    return jsonify(stock_data)
+    except Exception as error:
+        print("Yahoo Finance Error:", error)
+        return jsonify({
+            "error": "Could not fetch historical stock data"
+        }), 502
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get("PORT", 5001))
+    app.run(host="0.0.0.0", port=port, debug=False)
