@@ -1,0 +1,8 @@
+cat > requirements.txt <<'EOF'
+flask
+flask-cors
+requests
+python-dotenv
+yfinance
+gunicorn
+EOF
